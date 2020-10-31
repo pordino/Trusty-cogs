@@ -1,14 +1,19 @@
-import discord
-
 from abc import ABC
-from redbot import VersionInfo, version_info
-from redbot.core import commands, checks, Config
-from redbot.core.i18n import Translator, cog_i18n
-from redbot.core.utils.chat_formatting import pagify, humanize_list
+from typing import Literal
 
+import discord
+from redbot import VersionInfo, version_info
+from redbot.core import Config, checks, commands
+from redbot.core.i18n import Translator, cog_i18n
+from redbot.core.utils.chat_formatting import humanize_list, pagify
+
+from .ascendedalert import AscendedAlert
 from .bossalert import BossAlert
-from .minibossalert import MinibossAlert
 from .cartalert import CartAlert
+from .immortalalert import ImmortalAlert
+from .minibossalert import MinibossAlert
+from .possessedalert import PossessedAlert
+from .transcendedalert import TranscendedAlert
 
 _ = Translator("AdventureAlert", __file__)
 
@@ -27,11 +32,19 @@ class CompositeMetaClass(type(commands.Cog), type(ABC)):
 
 @cog_i18n(_)
 class AdventureAlert(
-    BossAlert, MinibossAlert, CartAlert, commands.Cog, metaclass=CompositeMetaClass
+    BossAlert,
+    MinibossAlert,
+    CartAlert,
+    AscendedAlert,
+    TranscendedAlert,
+    ImmortalAlert,
+    PossessedAlert,
+    commands.Cog,
+    metaclass=CompositeMetaClass,
 ):
     """Alert when a dragon appears in adventure"""
 
-    __version__ = "1.3.3"
+    __version__ = "1.4.2"
     __author__ = ["TrustyJAID"]
 
     def __init__(self, bot):
@@ -46,26 +59,90 @@ class AdventureAlert(
             cart_roles=[],
             miniboss_users=[],
             miniboss_roles=[],
+            ascended_users=[],
+            ascended_roles=[],
+            transcended_users=[],
+            transcended_roles=[],
+            immortal_users=[],
+            immortal_roles=[],
+            possessed_users=[],
+            possessed_roles=[],
         )
-        self.config.register_user(adventure=False, miniboss=False, dragon=False, cart=False)
-        self.sanitize = {}
+        self.config.register_user(
+            adventure=False,
+            miniboss=False,
+            dragon=False,
+            cart=False,
+            ascended=False,
+            transcended=False,
+            immortal=False,
+            possessed=False,
+        )
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            self.sanitize = {"allowed_mentions": discord.AllowedMentions(users=True, roles=True)}
+        else:
+            self.sanitize = {}
 
     def format_help_for_context(self, ctx: commands.Context) -> str:
         """
-            Thanks Sinbad!
+        Thanks Sinbad!
         """
         pre_processed = super().format_help_for_context(ctx)
         return f"{pre_processed}\n\nCog Version: {self.__version__}"
+
+    async def red_delete_data_for_user(self, **kwargs):
+        """
+        Nothing to delete
+        """
+        return
+
+    async def red_delete_data_for_user(
+        self,
+        *,
+        requester: Literal["discord_deleted_user", "owner", "user", "user_strict"],
+        user_id: int,
+    ):
+        """
+        Method for finding users data inside the cog and deleting it.
+        """
+        await self.config.user_from_id(user_id).clear()
+        all_guilds = await self.config.all_guilds()
+        for g_id, settings in all_guilds.items():
+            guild = self.bot.get_guild(g_id)
+            if not guild:
+                continue
+            if user_id in settings["users"]:
+                all_guilds[g_id]["users"].remove(user_id)
+            if user_id in settings["adventure_users"]:
+                all_guilds[g_id]["adventure_users"].remove(user_id)
+            if user_id in settings["miniboss_users"]:
+                all_guilds[g_id]["miniboss_users"].remove(user_id)
+            if user_id in settings["cart_users"]:
+                all_guilds[g_id]["cart_users"].remove(user_id)
+            if user_id in settings["ascended_users"]:
+                all_guilds[g_id]["ascended_users"].remove(user_id)
+            if user_id in settings["transcended_users"]:
+                all_guilds[g_id]["transcended_users"].remove(user_id)
+            if user_id in settings["immortal_users"]:
+                all_guilds[g_id]["immortal_users"].remove(user_id)
+            if user_id in settings["possessed_users"]:
+                all_guilds[g_id]["possessed_users"].remove(user_id)
 
     @commands.group()
     async def adventurealert(self, ctx: commands.Context) -> None:
         """Set notifications for all adventures"""
         pass
 
+    @adventurealert.command()
+    async def removeall(self, ctx: commands.Context) -> None:
+        """Remove all adventurealert settings in all guilds"""
+        await self.red_delete_data_for_user(requester="user", user_id=ctx.author.id)
+        await ctx.send(_("Your Adventure Alerts have all been removed."))
+
     @adventurealert.command(name="settings", aliases=["setting"])
     async def alert_settings(self, ctx: commands.Context):
         """
-            Shows a list of servers you have alerts
+        Shows a list of servers you have alerts
         """
         global_settings = await self.config.user(ctx.author).all()
         msg = ""
@@ -77,7 +154,11 @@ class AdventureAlert(
             "cart_servers": ([], _("Cart Notifications")),
             "adventure_servers": ([], _("Adventure Notifications")),
             "boss_servers": ([], _("Dragon Notifications")),
-            "miniboss_servers": ([], _("Miniboss Notifications"))
+            "miniboss_servers": ([], _("Miniboss Notifications")),
+            "ascended_servers": ([], _("Ascended Notifications")),
+            "transcended_servers": ([], _("Transcended Notifications")),
+            "immortal_servers": ([], _("Immortal Notifications")),
+            "possessed_servers": ([], _("Possessed Notifications")),
         }
         all_guilds = await self.config.all_guilds()
         for g_id, settings in all_guilds.items():
@@ -92,6 +173,14 @@ class AdventureAlert(
                 all_data["miniboss_servers"][0].append(guild.name)
             if ctx.author.id in settings["cart_users"]:
                 all_data["cart_servers"][0].append(guild.name)
+            if ctx.author.id in settings["ascended_users"]:
+                all_data["ascended_servers"][0].append(guild.name)
+            if ctx.author.id in settings["transcended_users"]:
+                all_data["transcended_servers"][0].append(guild.name)
+            if ctx.author.id in settings["immortal_users"]:
+                all_data["immortal_servers"][0].append(guild.name)
+            if ctx.author.id in settings["possessed_users"]:
+                all_data["possessed_servers"][0].append(guild.name)
         for k, v in all_data.items():
             if v[0]:
                 msg += f"__**{v[1]}**__: {humanize_list(v[0])}\n\n"
@@ -120,6 +209,7 @@ class AdventureAlert(
                 _("{role} will now receive notifications on adventures.").format(role=role.name)
             )
 
+    @commands.guild_only()
     @adventurealert.command(name="add", aliases=["user", "users", "remove", "rem", "toggle"])
     async def adventure_users(self, ctx: commands.Context) -> None:
         """Toggle adventure notifications in this server"""
@@ -163,6 +253,9 @@ class AdventureAlert(
 
     @commands.Cog.listener()
     async def on_adventure(self, ctx: commands.Context) -> None:
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, ctx.guild):
+                return
         roles = [f"<@&{rid}>" for rid in await self.config.guild(ctx.guild).adventure_roles()]
         users = [f"<@!{uid}>" for uid in await self.config.guild(ctx.guild).adventure_users()]
         guild_members = [m.id for m in ctx.guild.members]

@@ -1,17 +1,15 @@
-import datetime
-import discord
 import asyncio
+import datetime
 import logging
+from typing import Sequence, Union, cast
 
+import discord
 from discord.ext.commands.converter import Converter
 from discord.ext.commands.errors import BadArgument
-
+from redbot.core import Config, VersionInfo, commands, modlog, version_info
 from redbot.core.bot import Red
-from redbot.core import commands, Config, modlog
 from redbot.core.i18n import Translator, cog_i18n
-from redbot.core.utils.chat_formatting import humanize_list, inline, escape
-
-from typing import Union, cast, Sequence
+from redbot.core.utils.chat_formatting import escape, humanize_list, inline
 
 _ = Translator("ExtendedModLog", __file__)
 logger = logging.getLogger("red.trusty-cogs.ExtendedModLog")
@@ -19,7 +17,7 @@ logger = logging.getLogger("red.trusty-cogs.ExtendedModLog")
 
 class CommandPrivs(Converter):
     """
-        Converter for command privliges
+    Converter for command privliges
     """
 
     async def convert(self, ctx: commands.Context, argument: str) -> str:
@@ -38,7 +36,7 @@ class CommandPrivs(Converter):
 
 class EventChooser(Converter):
     """
-        Converter for command privliges
+    Converter for command privliges
     """
 
     async def convert(self, ctx: commands.Context, argument: str) -> str:
@@ -72,13 +70,14 @@ class EventChooser(Converter):
 @cog_i18n(_)
 class EventMixin:
     """
-        Handles all the on_event data
+    Handles all the on_event data
     """
 
     def __init__(self, *args):
         self.config: Config
         self.bot: Red
         self.settings: dict
+        self._ban_cache: dict
 
     async def get_colour(self, channel: discord.TextChannel) -> discord.Colour:
         try:
@@ -170,6 +169,9 @@ class EventMixin:
         guild = ctx.guild
         if guild is None:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, ctx.guild):
+                return
         if guild.id not in self.settings:
             return
         if not self.settings[guild.id]["commands_used"]["enabled"]:
@@ -219,7 +221,8 @@ class EventMixin:
             else:
                 role = _("Not Set\nADMIN")
         elif privs == "BOT_OWNER":
-            role = f"<@!{ctx.bot.owner_id}>\n{privs}"
+            role = humanize_list([f"<@!{_id}>" for _id in ctx.bot.owner_ids])
+            role += f"\n{privs}"
         elif privs == "GUILD_OWNER":
             role = guild.owner.mention + f"\n{privs}"
         else:
@@ -237,12 +240,13 @@ class EventMixin:
         )
         if embed_links:
             embed = discord.Embed(
-                description=message.content, colour=await self.get_colour(channel), timestamp=time,
+                description=f"{ctx.author.mention} {message.content}",
+                colour=await self.get_event_colour(guild, "commands_used"),
+                timestamp=time,
             )
             embed.add_field(name=_("Channel"), value=message.channel.mention)
             embed.add_field(name=_("Can Run"), value=str(can_run))
-            embed.add_field(name=_("Required Role"), value=role)
-            embed.set_footer(text=_("User ID: ") + str(message.author.id))
+            embed.add_field(name=_("Requires"), value=role)
             author_title = _("{member} ({m_id})- Used a Command").format(
                 member=message.author, m_id=message.author.id
             )
@@ -262,6 +266,9 @@ class EventMixin:
         guild = self.bot.get_guild(guild_id)
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         # settings = await self.config.guild(guild).message_delete()
         settings = self.settings[guild.id]["message_delete"]
         if not settings["enabled"]:
@@ -355,7 +362,7 @@ class EventMixin:
             )
         if embed_links:
             embed = discord.Embed(
-                description=message.content,
+                description=f"{message.author.mention}: {message.content}",
                 colour=await self.get_event_colour(guild, "message_delete"),
                 timestamp=time,
             )
@@ -368,7 +375,6 @@ class EventMixin:
                 if len(message.attachments) > 1:
                     files = files[:-2]
                 embed.add_field(name=_("Attachments"), value=files)
-            embed.set_footer(text=_("User ID: ") + str(message.author.id))
             embed.set_author(
                 name=_("{member} ({m_id})- Deleted Message").format(member=author, m_id=author.id),
                 icon_url=str(message.author.avatar_url),
@@ -388,6 +394,9 @@ class EventMixin:
         guild = self.bot.get_guild(guild_id)
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         settings = self.settings[guild.id]["message_delete"]
         if not settings["enabled"] or not settings["bulk_enabled"]:
             return
@@ -436,7 +445,10 @@ class EventMixin:
 
     async def invite_links_loop(self) -> None:
         """Check every 5 minutes for updates to the invite links"""
-        await self.bot.wait_until_ready()
+        if version_info >= VersionInfo.from_str("3.2.0"):
+            await self.bot.wait_until_red_ready()
+        else:
+            await self.bot.wait_until_ready()
         while self is self.bot.get_cog("ExtendedModLog"):
             for guild_id in self.settings:
                 guild = self.bot.get_guild(guild_id)
@@ -452,16 +464,21 @@ class EventMixin:
             return False
         for invite in await guild.invites():
             try:
+
+                created_at = getattr(invite, "created_at", datetime.datetime.utcnow())
+                channel = getattr(invite, "channel", discord.Object(id=0))
+                inviter = getattr(invite, "inviter", discord.Object(id=0))
                 invites[invite.code] = {
-                    "uses": invite.uses,
-                    "max_age": invite.max_age,
-                    "created_at": invite.created_at.timestamp(),
-                    "max_uses": invite.max_uses,
-                    "temporary": invite.temporary,
-                    "inviter": invite.inviter.id,
-                    "channel": invite.channel.id,
+                    "uses": getattr(invite, "uses", 0),
+                    "max_age": getattr(invite, "max_age", None),
+                    "created_at": created_at.timestamp(),
+                    "max_uses": getattr(invite, "max_uses", None),
+                    "temporary": getattr(invite, "temporary", False),
+                    "inviter": getattr(inviter, "id", "Unknown"),
+                    "channel": channel.id,
                 }
             except Exception:
+                logger.exception("Error saving invites.")
                 pass
         await self.config.guild(guild).invite_links.set(invites)
         return True
@@ -482,16 +499,16 @@ class EventMixin:
                     # logger.info(f"{invite.code}: {invite.uses} - {uses}")
                     if invite.uses > uses:
                         possible_link = _(
-                            "https://discord.gg/{code}\n" "Invited by: {inviter}"
-                        ).format(code=invite.code, inviter=str(invite.inviter))
+                            "https://discord.gg/{code}\nInvited by: {inviter}"
+                        ).format(
+                            code=invite.code,
+                            inviter=str(getattr(invite, "inviter", _("Widget Integration"))),
+                        )
 
             if not possible_link:
                 for code, data in invites.items():
                     try:
-                        try:
-                            invite = await self.bot.get_invite(code)
-                        except AttributeError:
-                            invite = await self.bot.fetch_invite(code)
+                        invite = await self.bot.fetch_invite(code)
                     except (
                         discord.errors.NotFound,
                         discord.errors.HTTPException,
@@ -505,20 +522,22 @@ class EventMixin:
                             # The invite link was on its last uses and subsequently
                             # deleted so we're fairly sure this was the one used
                             try:
-                                inviter = await self.bot.get_user_info(data["inviter"])
-                            except AttributeError:
                                 inviter = await self.bot.fetch_user(data["inviter"])
+                            except (discord.errors.NotFound, discord.errors.Forbidden):
+                                inviter = _("Unknown or deleted user ({inviter})").format(
+                                    inviter=data["inviter"]
+                                )
                             possible_link = _(
-                                "https://discord.gg/{code}\n" "Invited by: {inviter}"
+                                "https://discord.gg/{code}\nInvited by: {inviter}"
                             ).format(code=code, inviter=str(inviter))
             await self.save_invite_links(guild)  # Save all the invites again since they've changed
         if check_logs and not possible_link:
             action = discord.AuditLogAction.invite_create
             async for log in guild.audit_logs(action=action):
                 if log.target.code not in invites:
-                    possible_link = _(
-                        "https://discord.gg/{code}\n" "Invited by: {inviter}"
-                    ).format(code=log.target.code, inviter=str(log.target.inviter))
+                    possible_link = _("https://discord.gg/{code}\nInvited by: {inviter}").format(
+                        code=log.target.code, inviter=str(log.target.inviter)
+                    )
                     break
         return possible_link
 
@@ -531,6 +550,9 @@ class EventMixin:
             return
         # if not await self.config.guild(guild).user_join.enabled():
         # return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         try:
             channel = await self.modlog_channel(guild, "user_join")
         except RuntimeError:
@@ -556,7 +578,6 @@ class EventMixin:
             )
             embed.add_field(name=_("Total Users:"), value=str(users))
             embed.add_field(name=_("Account created on:"), value=created_on)
-            embed.set_footer(text=_("User ID: ") + str(member.id))
             embed.set_author(
                 name=_("{member} ({m_id}) has joined the guild").format(
                     member=member, m_id=member.id
@@ -583,12 +604,29 @@ class EventMixin:
             await channel.send(msg)
 
     @commands.Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, member: discord.Member):
+        """
+        This is only used to track that the user was banned and not kicked/removed
+        """
+        if guild not in self._ban_cache:
+            self._ban_cache[guild] = [member]
+        else:
+            self._ban_cache[guild].append(member)
+
+    @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         guild = member.guild
+        await asyncio.sleep(5)
+        if guild in self._ban_cache and member in self._ban_cache[guild]:
+            # was a ban so we can leave early
+            return
         if guild.id not in self.settings:
             return
         if not self.settings[guild.id]["user_left"]["enabled"]:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         try:
             channel = await self.modlog_channel(guild, "user_left")
         except RuntimeError:
@@ -598,11 +636,12 @@ class EventMixin:
             and self.settings[guild.id]["user_left"]["embed"]
         )
         time = datetime.datetime.utcnow()
+        check_after = time + datetime.timedelta(minutes=-30)
         perp = None
         reason = None
         if channel.permissions_for(guild.me).view_audit_log:
             action = discord.AuditLogAction.kick
-            async for log in guild.audit_logs(limit=5, action=action):
+            async for log in guild.audit_logs(limit=5, after=check_after, action=action):
                 if log.target.id == member.id:
                     perp = log.user
                     reason = log.reason
@@ -617,8 +656,7 @@ class EventMixin:
             if perp:
                 embed.add_field(name=_("Kicked"), value=perp.mention)
             if reason:
-                embed.add_field(name=_("Reason"), value=str(reason))
-            embed.set_footer(text=_("User ID: ") + str(member.id))
+                embed.add_field(name=_("Reason"), value=str(reason), inline=False)
             embed.set_author(
                 name=_("{member} ({m_id}) has left the guild").format(
                     member=member, m_id=member.id
@@ -701,6 +739,9 @@ class EventMixin:
             return
         if not self.settings[guild.id]["channel_create"]["enabled"]:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if await self.is_ignored_channel(guild, new_channel):
             return
         try:
@@ -742,7 +783,7 @@ class EventMixin:
             embed.add_field(name=_("Created by "), value=perp.mention)
         if reason:
             perp_msg += _(" Reason: {reason}").format(reason=reason)
-            embed.add_field(name=_("Reason "), value=reason)
+            embed.add_field(name=_("Reason "), value=reason, inline=False)
         msg = _("{emoji} `{time}` {chan_type} channel created {perp_msg} {channel}").format(
             emoji=self.settings[guild.id]["channel_create"]["emoji"],
             time=time.strftime("%H:%M:%S"),
@@ -762,6 +803,9 @@ class EventMixin:
             return
         if not self.settings[guild.id]["channel_delete"]["enabled"]:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if await self.is_ignored_channel(guild, old_channel):
             return
         try:
@@ -798,10 +842,10 @@ class EventMixin:
         embed.add_field(name=_("Type"), value=channel_type)
         if perp:
             perp_msg = _("by {perp} (`{perp_id}`)").format(perp=perp, perp_id=perp.id)
-            embed.add_field(name=_("Created by "), value=perp.mention)
+            embed.add_field(name=_("Deleted by "), value=perp.mention)
         if reason:
             perp_msg += _(" Reason: {reason}").format(reason=reason)
-            embed.add_field(name=_("Reason "), value=reason)
+            embed.add_field(name=_("Reason "), value=reason, inline=False)
         msg = _("{emoji} `{time}` {chan_type} channel deleted {perp_msg} {channel}").format(
             emoji=self.settings[guild.id]["channel_delete"]["emoji"],
             time=time.strftime("%H:%M:%S"),
@@ -821,7 +865,12 @@ class EventMixin:
         guild = before.guild
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["channel_change"]["enabled"]:
+            return
+        if await self.is_ignored_channel(guild, before):
             return
         try:
             channel = await self.modlog_channel(guild, "channel_change")
@@ -920,7 +969,7 @@ class EventMixin:
             embed.add_field(name=_("Updated by "), value=perp.mention)
         if reason:
             msg += _("Reason ") + reason + "\n"
-            embed.add_field(name=_("Reason "), value=reason)
+            embed.add_field(name=_("Reason "), value=reason, inline=False)
         if not worth_updating:
             return
         if embed_links:
@@ -972,6 +1021,9 @@ class EventMixin:
         guild = before.guild
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["role_change"]["enabled"]:
             return
         try:
@@ -1010,7 +1062,7 @@ class EventMixin:
             embed.add_field(name=_("Updated by "), value=perp.mention)
         if reason:
             msg += _("Reason ") + reason + "\n"
-            embed.add_field(name=_("Reason "), value=reason)
+            embed.add_field(name=_("Reason "), value=reason, inline=False)
         role_updates = {
             "name": _("Name:"),
             "color": _("Colour:"),
@@ -1048,6 +1100,9 @@ class EventMixin:
         guild = role.guild
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["role_create"]["enabled"]:
             return
         try:
@@ -1087,7 +1142,7 @@ class EventMixin:
             msg += _("By ") + str(perp) + "\n"
         if reason:
             msg += _("Reason ") + reason + "\n"
-            embed.add_field(name=_("Reason "), value=reason)
+            embed.add_field(name=_("Reason "), value=reason, inline=False)
         if embed_links:
             await channel.send(embed=embed)
         else:
@@ -1098,6 +1153,9 @@ class EventMixin:
         guild = role.guild
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["role_delete"]["enabled"]:
             return
         try:
@@ -1137,7 +1195,7 @@ class EventMixin:
             msg += _("By ") + str(perp) + "\n"
         if reason:
             msg += _("Reason ") + reason + "\n"
-            embed.add_field(name=_("Reason "), value=reason)
+            embed.add_field(name=_("Reason "), value=reason, inline=False)
         if embed_links:
             await channel.send(embed=embed)
         else:
@@ -1150,6 +1208,9 @@ class EventMixin:
             return
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         settings = self.settings[guild.id]["message_edit"]
         if not settings["enabled"]:
             return
@@ -1171,14 +1232,13 @@ class EventMixin:
         fmt = "%H:%M:%S"
         if embed_links:
             embed = discord.Embed(
-                description=before.content,
+                description=f"{before.author.mention}: {before.content}",
                 colour=await self.get_event_colour(guild, "message_edit"),
                 timestamp=before.created_at,
             )
             jump_url = f"[Click to see new message]({after.jump_url})"
             embed.add_field(name=_("After Message:"), value=jump_url)
             embed.add_field(name=_("Channel:"), value=before.channel.mention)
-            embed.set_footer(text=_("User ID: ") + str(before.author.id))
             embed.set_author(
                 name=_("{member} ({m_id}) - Edited Message").format(
                     member=before.author, m_id=before.author.id
@@ -1206,6 +1266,9 @@ class EventMixin:
         guild = after
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["guild_change"]["enabled"]:
             return
         try:
@@ -1223,7 +1286,8 @@ class EventMixin:
         embed.set_author(name=_("Updated Guild"), icon_url=str(guild.icon_url))
         embed.set_thumbnail(url=str(guild.icon_url))
         msg = _("{emoji} `{time}` Guild updated\n").format(
-            emoji=self.settings[guild.id]["guild_change"]["emoji"], time=time.strftime("%H:%M:%S"),
+            emoji=self.settings[guild.id]["guild_change"]["emoji"],
+            time=time.strftime("%H:%M:%S"),
         )
         guild_updates = {
             "name": _("Name:"),
@@ -1242,6 +1306,10 @@ class EventMixin:
             after_attr = getattr(after, attr)
             if before_attr != after_attr:
                 worth_updating = True
+                if attr == "icon_url":
+                    embed.description = _("Server Icon Updated")
+                    embed.set_image(url=after.icon_url)
+                    continue
                 msg += _("Before ") + f"{name} {before_attr}\n"
                 msg += _("After ") + f"{name} {after_attr}\n"
                 embed.add_field(name=_("Before ") + name, value=str(before_attr))
@@ -1264,7 +1332,7 @@ class EventMixin:
         if reasons:
             s_reasons = ", ".join(str(r) for r in reasons)
             msg += _("Reasons ") + f"{reasons}\n"
-            embed.add_field(name=_("Reasons "), value=s_reasons)
+            embed.add_field(name=_("Reasons "), value=s_reasons, inline=False)
         if embed_links:
             await channel.send(embed=embed)
         else:
@@ -1276,6 +1344,9 @@ class EventMixin:
     ) -> None:
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["emoji_change"]["enabled"]:
             return
         try:
@@ -1403,7 +1474,7 @@ class EventMixin:
             msg += _("Updated by ") + str(perp) + "\n"
         if reason:
             msg += _("Reason ") + reason + "\n"
-            embed.add_field(name=_("Reason "), value=reason)
+            embed.add_field(name=_("Reason "), value=reason, inline=False)
         if embed_links:
             await channel.send(embed=embed)
         else:
@@ -1416,6 +1487,9 @@ class EventMixin:
         guild = member.guild
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["voice_change"]["enabled"]:
             return
         if member.bot:
@@ -1436,7 +1510,8 @@ class EventMixin:
         )
         time = datetime.datetime.utcnow()
         embed = discord.Embed(
-            timestamp=time, colour=await self.get_event_colour(guild, "voice_change"),
+            timestamp=time,
+            colour=await self.get_event_colour(guild, "voice_change"),
         )
         msg = _("{emoji} `{time}` Updated Voice State for **{member}** (`{m_id}`)").format(
             emoji=self.settings[guild.id]["voice_change"]["emoji"],
@@ -1509,7 +1584,7 @@ class EventMixin:
             embed.add_field(name=_("Updated by"), value=perp.mention)
         if reason:
             msg += _("Reason ") + reason + "\n"
-            embed.add_field(name=_("Reason "), value=reason)
+            embed.add_field(name=_("Reason "), value=reason, inline=False)
         if embed_links:
             await channel.send(embed=embed)
         else:
@@ -1520,6 +1595,9 @@ class EventMixin:
         guild = before.guild
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["user_change"]["enabled"]:
             return
         if not self.settings[guild.id]["user_change"]["bots"] and after.bot:
@@ -1554,20 +1632,29 @@ class EventMixin:
             before_attr = getattr(before, attr)
             after_attr = getattr(after, attr)
             if before_attr != after_attr:
-                worth_sending = True
                 if attr == "roles":
                     b = set(before.roles)
                     a = set(after.roles)
-                    before_roles = [list(b - a)][0]
-                    after_roles = [list(a - b)][0]
+                    before_roles = list(b - a)
+                    after_roles = list(a - b)
                     if before_roles:
                         for role in before_roles:
-                            msg += role.name + _(" Role Removed.")
-                            embed.description = role.mention + _(" Role removed.")
+                            msg += _("{author} had the {role} role removed.").format(
+                                author=after.name, role=role.name
+                            )
+                            embed.description = _("{author} had the {role} role removed.").format(
+                                author=after.mention, role=role.mention
+                            )
+                            worth_sending = True
                     if after_roles:
                         for role in after_roles:
-                            msg += role.name + _(" Role Applied.")
-                            embed.description = role.mention + _(" Role applied.")
+                            msg += _("{author} had the {role} role applied.").format(
+                                author=after.name, role=role.name
+                            )
+                            embed.description = _("{author} had the {role} role applied.").format(
+                                author=after.mention, role=role.mention
+                            )
+                            worth_sending = True
                     if channel.permissions_for(guild.me).view_audit_log:
                         action = discord.AuditLogAction.member_role_update
                         async for log in guild.audit_logs(limit=5, action=action):
@@ -1585,8 +1672,12 @@ class EventMixin:
                                 if log.reason:
                                     reason = log.reason
                                 break
+                    worth_sending = True
                     msg += _("Before ") + f"{name} {before_attr}\n"
                     msg += _("After ") + f"{name} {after_attr}\n"
+                    embed.description = _("{author} changed their nickname.").format(
+                        author=after.mention
+                    )
                     embed.add_field(name=_("Before ") + name, value=str(before_attr)[:1024])
                     embed.add_field(name=_("After ") + name, value=str(after_attr)[:1024])
         if not worth_sending:
@@ -1596,7 +1687,7 @@ class EventMixin:
             embed.add_field(name=_("Updated by "), value=perp.mention)
         if reason:
             msg += _("Reason: ") + f"{reason}\n"
-            embed.add_field(name=_("Reason"), value=reason)
+            embed.add_field(name=_("Reason"), value=reason, inline=False)
         if embed_links:
             await channel.send(embed=embed)
         else:
@@ -1605,11 +1696,30 @@ class EventMixin:
     @commands.Cog.listener()
     async def on_invite_create(self, invite: discord.Invite) -> None:
         """
-            New in discord.py 1.3
+        New in discord.py 1.3
         """
         guild = invite.guild
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
+        if invite.code not in self.settings[guild.id]["invite_links"]:
+            created_at = getattr(invite, "created_at", datetime.datetime.utcnow())
+            inviter = getattr(invite, "inviter", discord.Object(id=0))
+            channel = getattr(invite, "channel", discord.Object(id=0))
+            self.settings[guild.id]["invite_links"][invite.code] = {
+                "uses": getattr(invite, "uses", 0),
+                "max_age": getattr(invite, "max_age", None),
+                "created_at": created_at.timestamp(),
+                "max_uses": getattr(invite, "max_uses", None),
+                "temporary": getattr(invite, "temporary", False),
+                "inviter": getattr(inviter, "id", "Unknown"),
+                "channel": channel.id,
+            }
+            await self.config.guild(guild).invite_links.set(
+                self.settings[guild.id]["invite_links"]
+            )
         if not self.settings[guild.id]["invite_created"]["enabled"]:
             return
         try:
@@ -1631,13 +1741,17 @@ class EventMixin:
         except AttributeError:
             invite_time = datetime.datetime.utcnow().strftime("%H:%M:%S")
         msg = _("{emoji} `{time}` Invite created ").format(
-            emoji=self.settings[guild.id]["invite_created"]["emoji"], time=invite_time,
+            emoji=self.settings[guild.id]["invite_created"]["emoji"],
+            time=invite_time,
         )
         embed = discord.Embed(
-            title=_("Invite Created"),
-            colour=await self.get_event_colour(guild, "invite_created")
+            title=_("Invite Created"), colour=await self.get_event_colour(guild, "invite_created")
         )
         worth_updating = False
+        if getattr(invite, "inviter", None):
+            embed.description = _("{author} created an invite for {channel}.").format(
+                author=invite.inviter.mention, channel=invite.channel.mention
+            )
         for attr, name in invite_attrs.items():
             before_attr = getattr(invite, attr)
             if before_attr:
@@ -1654,11 +1768,14 @@ class EventMixin:
     @commands.Cog.listener()
     async def on_invite_delete(self, invite: discord.Invite) -> None:
         """
-            New in discord.py 1.3
+        New in discord.py 1.3
         """
         guild = invite.guild
         if guild.id not in self.settings:
             return
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, guild):
+                return
         if not self.settings[guild.id]["invite_deleted"]["enabled"]:
             return
         try:
@@ -1681,12 +1798,16 @@ class EventMixin:
         except AttributeError:
             invite_time = datetime.datetime.utcnow().strftime("%H:%M:%S")
         msg = _("{emoji} `{time}` Invite deleted ").format(
-            emoji=self.settings[guild.id]["invite_deleted"]["emoji"], time=invite_time,
+            emoji=self.settings[guild.id]["invite_deleted"]["emoji"],
+            time=invite_time,
         )
         embed = discord.Embed(
-            title=_("Invite Deleted"),
-            colour=await self.get_event_colour(guild, "invite_deleted")
+            title=_("Invite Deleted"), colour=await self.get_event_colour(guild, "invite_deleted")
         )
+        if getattr(invite, "inviter", None):
+            embed.description = _("{author} deleted or used up an invite for {channel}.").format(
+                author=invite.inviter.mention, channel=invite.channel.mention
+            )
         worth_updating = False
         for attr, name in invite_attrs.items():
             before_attr = getattr(invite, attr)

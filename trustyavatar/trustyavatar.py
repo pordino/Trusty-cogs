@@ -1,25 +1,25 @@
-import discord
 import asyncio
-import aiohttp
 import functools
 import logging
 import sys
-
-from redbot.core import commands, checks, Config
-from random import choice, randint
 from datetime import datetime
-from PIL import Image, ImageSequence
 from io import BytesIO
-from typing import Union, Optional
+from random import choice, randint
+from typing import Optional, Tuple, Union
 
-log = logging.getLogger("red.trusty-cogs.ServerStats")
+import aiohttp
+import discord
+from PIL import Image, ImageSequence
+from redbot.core import Config, VersionInfo, checks, commands, version_info
+
+log = logging.getLogger("red.trusty-cogs.TrustyAvatar")
 
 
 class TrustyAvatar(commands.Cog):
     """Changes the bot's image every so often"""
 
     __author__ = ["TrustyJAID"]
-    __version__ = "1.2.0"
+    __version__ = "1.2.3"
 
     def __init__(self, bot):
         self.bot = bot
@@ -29,7 +29,13 @@ class TrustyAvatar(commands.Cog):
             discord.ActivityType.listening,
             discord.ActivityType.watching,
         ]
-        defaults = {"status": False, "streaming": False, "avatar": False, "last_avatar": 0.0}
+        defaults = {
+            "status": False,
+            "streaming": False,
+            "avatar": False,
+            "last_avatar": 0.0,
+            "search_guild": None,
+        }
         self.config = Config.get_conf(self, 218773382617890828)
         self.config.register_global(**defaults)
         self.loop = bot.loop.create_task(self.maybe_change_avatar())
@@ -94,10 +100,16 @@ class TrustyAvatar(commands.Cog):
 
     def format_help_for_context(self, ctx: commands.Context) -> str:
         """
-            Thanks Sinbad!
+        Thanks Sinbad!
         """
         pre_processed = super().format_help_for_context(ctx)
         return f"{pre_processed}\n\nCog Version: {self.__version__}"
+
+    async def red_delete_data_for_user(self, **kwargs):
+        """
+        Nothing to delete
+        """
+        return
 
     async def dl_image(self, url: str) -> BytesIO:
         """Download bytes like object of user avatar"""
@@ -175,12 +187,12 @@ class TrustyAvatar(commands.Cog):
         is_gif: bool = False,
     ):
         """
-            Create your own avatar like TrustyBot's
+        Create your own avatar like TrustyBot's
 
-            `style` can be a user or a colour code if none is supplied the authors avatar
-            is used
-            `face` must be one of neutral, happy, unamused, quizzical,
-            sad, angry, or watching if none are supplied a random one is picked
+        `style` can be a user or a colour code if none is supplied the authors avatar
+        is used
+        `face` must be one of neutral, happy, unamused, quizzical,
+        sad, angry, or watching if none are supplied a random one is picked
 
         """
         author = ctx.author
@@ -234,17 +246,17 @@ class TrustyAvatar(commands.Cog):
     @checks.is_owner()
     async def trustyavatarset(self, ctx: commands.Context):
         """
-            Commands for overriding aspects of the bots avatar changes
+        Commands for overriding aspects of the bots avatar changes
         """
         pass
 
     @trustyavatarset.command()
     async def set(self, ctx: commands.Context, *, name: str):
         """
-            Manually change preset options
+        Manually change preset options
 
-            `name` must be one of neutral, happy, unamused, quizzical,
-            sad, angry, or watching
+        `name` must be one of neutral, happy, unamused, quizzical,
+        sad, angry, or watching
         """
         if name.lower() not in self.statuses:
             return
@@ -257,16 +269,26 @@ class TrustyAvatar(commands.Cog):
     @trustyavatarset.command()
     async def status(self, ctx: commands.Context):
         """
-            Toggle status automatic changing
+        Toggle status automatic changing
         """
         is_override = await self.config.status()
         await self.config.status.set(not is_override)
         await ctx.send("Status override set to " + str(not is_override))
 
     @trustyavatarset.command()
+    async def guild(self, ctx: commands.Context, guild_id: int):
+        """
+        Set a guild preferrably owned by the bot owner for the bot
+        to use to get a member object of the owner for streaming status
+        updates.
+        """
+        await self.config.search_guild.set(guild_id)
+        await ctx.send("Default guild set to " + str(guild_id))
+
+    @trustyavatarset.command()
     async def avatar(self, ctx: commands.Context):
         """
-            Toggle avatar automatic changing
+        Toggle avatar automatic changing
         """
         is_override = await self.config.avatar()
         await self.config.avatar.set(not is_override)
@@ -275,7 +297,7 @@ class TrustyAvatar(commands.Cog):
     @trustyavatarset.command()
     async def streaming(self, ctx: commands.Context):
         """
-            Toggle owner streaming sync
+        Toggle owner streaming sync
         """
         is_streaming = await self.config.streaming()
         await self.config.streaming.set(not is_streaming)
@@ -288,8 +310,9 @@ class TrustyAvatar(commands.Cog):
             return
         if not await self.config.streaming():
             return
-        if type(after.activity) == discord.ActivityType.streaming:
-            await self.bot.change_presence(activity=after.activity)
+        for activity in after.activities:
+            if type(activity) == discord.ActivityType.streaming:
+                await self.bot.change_presence(activity=after.activity)
 
     async def change_avatar(self, url: str) -> None:
         now = datetime.now().timestamp()
@@ -315,11 +338,14 @@ class TrustyAvatar(commands.Cog):
 
     async def get_activity(self, new_status: dict) -> tuple:
         """
-            This will return which avatar, status, and activity to use
+        This will return which avatar, status, and activity to use
         """
         date = datetime.now()
-        activity = None
-        status = None
+        activity = discord.Activity(
+            name=choice(new_status["game"]), type=choice(new_status["type"])
+        )
+        status = new_status["status"]
+        url = new_status["link"]
         if date.month == 12 and date.day <= 25:
             url = new_status["xmas"]
             activity = discord.Activity(name="Merry Christmas!", type=discord.ActivityType.playing)
@@ -328,37 +354,38 @@ class TrustyAvatar(commands.Cog):
             url = new_status["link"]
             activity = discord.Activity(name="Happy New Year!", type=discord.ActivityType.playing)
             status = discord.Status.online
-        else:
-            url = new_status["link"]
-            activity = discord.Activity(
-                name=choice(new_status["game"]), type=choice(new_status["type"])
-            )
-            status = new_status["status"]
         return status, activity, url
 
-    async def get_bot_owner(self) -> discord.Member:
+    async def get_bot_owner_streaming(self) -> Tuple[bool, Optional[discord.Activity]]:
         """
-            Probably somewhat expensive once we start scaling
-            Hopefully we can get owner as a member object easier in the future
-            without hard coding a server to search for the owner of the bot
+        Probably somewhat expensive once we start scaling
+        Hopefully we can get owner as a member object easier in the future
+        without hard coding a server to search for the owner of the bot
         """
-        for members in self.bot.get_all_members():
-            if members.id == self.bot.owner_id:
-                member = members
-        return member
+        guild_id = await self.config.search_guild()
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            return False, None
+        owner = guild.get_member(self.bot.owner_id)
+        for activity in owner.activites:
+            if type(activity) == discord.ActivityType.streaming:
+                return True, activity
+        return False
 
     async def maybe_change_avatar(self) -> None:
-        await self.bot.wait_until_ready()
+        if version_info >= VersionInfo.from_str("3.2.0"):
+            await self.bot.wait_until_red_ready()
+        else:
+            await self.bot.wait_until_ready()
         while self is self.bot.get_cog("TrustyAvatar"):
 
             new_avatar = choice([s for s in self.statuses])
             new_status = self.statuses.get(new_avatar, None)
             status, activity, url = await self.get_activity(new_status)
-            owner = await self.get_bot_owner()
-            is_streaming = type(owner.activity) == discord.ActivityType.streaming
+            is_streaming, stream_activity = await self.get_bot_owner_streaming()
             if await self.config.streaming():
                 if is_streaming:
-                    await self.change_activity(None, owner.activity)
+                    await self.change_activity(None, stream_activity)
                     log.debug("Changing to owner is streaming status.")
             if await self.config.status() and not is_streaming:
                 # we don't want to override the streaming status if the owner is streaming

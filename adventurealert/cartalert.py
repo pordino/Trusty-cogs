@@ -1,8 +1,8 @@
 import discord
-
-from redbot.core import commands, checks
+from redbot import VersionInfo, version_info
+from redbot.core import checks, commands
 from redbot.core.i18n import Translator
-from redbot.core.utils.chat_formatting import pagify, humanize_list
+from redbot.core.utils.chat_formatting import humanize_list, pagify
 
 from .abc import MixinMeta
 
@@ -34,6 +34,7 @@ class CartAlert(MixinMeta):
                 _("{role} will now receive notifications on carts.").format(role=role.name)
             )
 
+    @commands.guild_only()
     @cartalert.command(name="add", aliases=["user", "users", "remove", "rem", "toggle"])
     async def cart_users(self, ctx: commands.Context) -> None:
         """Toggle cart notifications on this server"""
@@ -64,19 +65,20 @@ class CartAlert(MixinMeta):
             async with self.config.guild(ctx.guild).cart_users() as data:
                 data.remove(user_id)
             await ctx.send(
-                _("{user_id} will no longer receive notifications on adventures.").format(
+                _("{user_id} will no longer receive notifications on carts.").format(
                     user_id=user_id
                 )
             )
         else:
             await ctx.send(
-                _("{user_id} is not receiving notifications on adventures.").format(
-                    user_id=user_id
-                )
+                _("{user_id} is not receiving notifications on carts.").format(user_id=user_id)
             )
 
     @commands.Cog.listener()
     async def on_adventure_cart(self, ctx: commands.Context) -> None:
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, ctx.guild):
+                return
         roles = [f"<@&{rid}>" for rid in await self.config.guild(ctx.guild).cart_roles()]
         users = [f"<@!{uid}>" for uid in await self.config.guild(ctx.guild).cart_users()]
         guild_members = [m.id for m in ctx.guild.members]

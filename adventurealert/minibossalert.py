@@ -1,8 +1,8 @@
 import discord
-
-from redbot.core import commands, checks
+from redbot import VersionInfo, version_info
+from redbot.core import checks, commands
 from redbot.core.i18n import Translator
-from redbot.core.utils.chat_formatting import pagify, humanize_list
+from redbot.core.utils.chat_formatting import humanize_list, pagify
 
 from .abc import MixinMeta
 
@@ -33,11 +33,10 @@ class MinibossAlert(MixinMeta):
             async with self.config.guild(ctx.guild).miniboss_roles() as data:
                 data.append(role.id)
             await ctx.send(
-                _("{role} will now receive notifications on minibosses.").format(
-                    role=role.name
-                )
+                _("{role} will now receive notifications on minibosses.").format(role=role.name)
             )
 
+    @commands.guild_only()
     @minibossalert.command(name="add", aliases=["user", "users", "remove", "rem", "toggle"])
     async def miniboss_users(self, ctx: commands.Context) -> None:
         """Toggle miniboss notifications in this server"""
@@ -81,6 +80,9 @@ class MinibossAlert(MixinMeta):
 
     @commands.Cog.listener()
     async def on_adventure_miniboss(self, ctx: commands.Context) -> None:
+        if version_info >= VersionInfo.from_str("3.4.0"):
+            if await self.bot.cog_disabled_in_guild(self, ctx.guild):
+                return
         roles = [f"<@&{rid}>" for rid in await self.config.guild(ctx.guild).miniboss_roles()]
         users = [f"<@!{uid}>" for uid in await self.config.guild(ctx.guild).miniboss_users()]
         guild_members = [m.id for m in ctx.guild.members]
